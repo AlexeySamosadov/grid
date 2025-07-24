@@ -10,6 +10,7 @@ import {
     getAssociatedTokenAddress,
     createAssociatedTokenAccountInstruction
 } from '@solana/spl-token';
+import { logAndSendMessage } from './bot.js'; // Импортируем функцию логирования
 
 /* ─── Конфигурация из .env ─── */
 const {
@@ -59,7 +60,7 @@ function logTrade(action, price, amount, solBalance, phBalance) {
     }
 
     fs.appendFileSync(logFilePath, logEntry);
-    console.log(`Logged: ${logEntry}`);
+    logAndSendMessage(`Logged: ${logEntry}`); // Отправляем лог в Telegram
 }
 
 /* ─── MAIN ЛОГИКА ─── */
@@ -72,7 +73,7 @@ async function main() {
     const low = Number(GRID_LOWER), up = Number(GRID_UPPER), steps = Number(GRID_STEPS);
     const gridPrices = Array.from({ length: steps + 1 }, (_, i) => low + (up - low) * i / steps);
     const state = loadState(gridPrices);
-    console.log('Grid levels:', gridPrices.map(p => p.toFixed(9)));
+    logAndSendMessage(`Grid levels: ${gridPrices.map(p => p.toFixed(9))}`);
 
     const outMint = new PublicKey(OUTPUT_MINT);
     const ata = await getAssociatedTokenAddress(outMint, w.publicKey);
@@ -83,9 +84,9 @@ async function main() {
         tx.recentBlockhash = (await cxn.getLatestBlockhash()).blockhash;
         tx.sign(kp);
         await cxn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-        console.log('✅ ATA created:', ata.toBase58());
+        logAndSendMessage(`✅ ATA created: ${ata.toBase58()}`);
     } else {
-        console.log('✅ ATA exists:', ata.toBase58());
+        logAndSendMessage(`✅ ATA exists: ${ata.toBase58()}`);
     }
 
     const outMintInfo = await getMint(cxn, outMint);
@@ -95,7 +96,7 @@ async function main() {
     const commissionReserve = COMMISSION_RESERVE_MULTIPLIER * GRID_STEPS * Number(0.01); // Рассчитываем резерв для 30 ячеек
 
     let prevPrice = Infinity;
-    console.log(`\nStarting grid every ${CHECK_INTERVAL / 1000}s\n`);
+    logAndSendMessage(`\nStarting grid every ${CHECK_INTERVAL / 1000}s\n`);
 
     setInterval(trySwap, Number(CHECK_INTERVAL));
 
@@ -111,12 +112,12 @@ async function main() {
             sampleURL.searchParams.set('slippageBps', SLIPPAGE_BPS);
             const sampleJ = await (await fetch(sampleURL)).json();
             if (!sampleJ.routePlan?.length) {
-                console.log(`[${now}] Нет цены для обмена`);
+                logAndSendMessage(`[${now}] Нет цены для обмена`);
                 return;
             }
             const curPrice = (Number(sampleAmt) / 1e9) / (Number(sampleJ.outAmount) / (10 ** outDec));
 
-            console.log(`[${now}] Актуальная цена: ${curPrice.toFixed(9)} SOL/PH`);
+            logAndSendMessage(`[${now}] Актуальная цена: ${curPrice.toFixed(9)} SOL/PH`);
 
             // --- Шаг 2: Балансы ---
             const solLam = await cxn.getBalance(w.publicKey, 'confirmed');
@@ -124,7 +125,7 @@ async function main() {
             const phRaw = (await cxn.getTokenAccountBalance(ata)).value.amount;
             const phBal = Number(phRaw) / (10 ** outDec);
 
-            console.log(`[${now}] Балансы: SOL ${solBal.toFixed(6)} | PH ${phBal.toFixed(3)}`);
+            logAndSendMessage(`[${now}] Балансы: SOL ${solBal.toFixed(6)} | PH ${phBal.toFixed(3)}`);
 
             // --- Шаг 3: Портфель и свободный капитал ---
             const investedPhSOL = state.levels
@@ -133,7 +134,7 @@ async function main() {
             const totalValueSOL = solBal + phBal * curPrice;
             const freeValueSOL = totalValueSOL - investedPhSOL - Number(commissionReserve) / 1e9;
 
-            console.log(`[${now}] Свободные средства для покупки: ${freeValueSOL.toFixed(6)} SOL`);
+            logAndSendMessage(`[${now}] Свободные средства для покупки: ${freeValueSOL.toFixed(6)} SOL`);
 
             // --- Шаг 4: Свободные средства для покупки ---
             const remain = steps - state.levels.filter(l => l.bought).length;
@@ -147,8 +148,8 @@ async function main() {
                 perGridLamports = BigInt(Math.floor((availableSOL * 1e9) / gridsToBuy));
             }
 
-            console.log(`[${now}] Dynamic per-grid buy: ${(Number(perGridLamports) / 1e9).toFixed(6)} SOL`);
-            console.log(`[${now}] Балансы: ${solBal.toFixed(6)} SOL | ${phBal.toFixed(3)} PH | цена ${curPrice.toFixed(9)}`);
+            logAndSendMessage(`[${now}] Dynamic per-grid buy: ${(Number(perGridLamports) / 1e9).toFixed(6)} SOL`);
+            logAndSendMessage(`[${now}] Балансы: ${solBal.toFixed(6)} SOL | ${phBal.toFixed(3)} PH | цена ${curPrice.toFixed(9)}`);
 
             // Если на балансе недостаточно средств для покупки или всё куплено — только продажи
             if (perGridLamports > 0n) {
@@ -164,7 +165,7 @@ async function main() {
                     for (let i = 0; i < gridPrices.length; i++) {
                         const lvl = state.levels[i];
                         if (!lvl.bought && prevPrice > lvl.price && price <= lvl.price) {
-                            console.log(`🔔 Цена упала ниже ${lvl.price.toFixed(9)} — grid#${i} BUY`);
+                            logAndSendMessage(`🔔 Цена упала ниже ${lvl.price.toFixed(9)} — grid#${i} BUY`);
                             await execSwap(buyJ);
                             lvl.bought = true;
                             lvl.phAmount = buyJ.outAmount;
@@ -192,7 +193,7 @@ async function main() {
                     const phIn = Number(lvl.phAmount) / (10 ** outDec);
                     const sellPr = solOut / phIn;
                     if (sellPr >= Number(SELL_THRESHOLD)) {
-                        console.log(`🔔 Цена >= ${sellPr.toFixed(9)} — grid#${i} SELL`);
+                        logAndSendMessage(`🔔 Цена >= ${sellPr.toFixed(9)} — grid#${i} SELL`);
                         await execSwap(sellJ);
                         lvl.bought = false;
                         lvl.phAmount = null;
@@ -204,6 +205,7 @@ async function main() {
 
         } catch (e) {
             console.error(`[${now}] Ошибка:`, e);
+            logAndSendMessage(`[${now}] Ошибка: ${e.message}`);
         }
     }
 
@@ -219,7 +221,7 @@ async function main() {
         await w.signTransaction(tx);
         const sig = await cxn.sendRawTransaction(tx.serialize());
         await cxn.confirmTransaction(sig);
-        console.log(`   ↳ tx: ${sig}`);
+        logAndSendMessage(`   ↳ tx: ${sig}`);
     }
 }
 
