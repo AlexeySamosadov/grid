@@ -11,26 +11,20 @@ import {
     createAssociatedTokenAccountInstruction
 } from '@solana/spl-token';
 
-////////////////////////////////////////////////////////////////////////////////
-// Конфиг из .env
-////////////////////////////////////////////////////////////////////////////////
+/* ──────────────── .env ──────────────── */
 const {
     SOLANA_RPC_URL, KEYPAIR_PATH,
-    INPUT_MINT, OUTPUT_MINT,
-    SLIPPAGE_BPS, CHECK_INTERVAL,
-    GRID_LOWER, GRID_UPPER,
-    GRID_STEPS, SELL_THRESHOLD,
+    INPUT_MINT,     OUTPUT_MINT,
+    SLIPPAGE_BPS,   CHECK_INTERVAL,
+    GRID_LOWER,     GRID_UPPER,
+    GRID_STEPS,     SELL_THRESHOLD,
     COMMISSION_RESERVE_MULTIPLIER // Добавлено: множитель для комиссии
 } = process.env;
 
-////////////////////////////////////////////////////////////////////////////////
-// Путь к файлу состояния грида
-////////////////////////////////////////////////////////////////////////////////
+/* ───────── state file ───────── */
 const STATE_PATH = path.resolve('grid_state.json');
 
-////////////////////////////////////////////////////////////////////////////////
-// Функции для загрузки/сохранения state с миграцией старых флагов
-////////////////////////////////////////////////////////////////////////////////
+/* ─── load / save state ─── */
 function loadState(gridPrices) {
     let old = null;
     try { old = JSON.parse(fs.readFileSync(STATE_PATH)); } catch {}
@@ -170,7 +164,7 @@ async function main(){
                     const sellJ = await (await fetch(sellURL)).json();
                     if (!sellJ.routePlan?.length) continue;
                     const solOut = Number(sellJ.outAmount) / 1e9;
-                    const phIn = Number(lvl.phAmount) / (10 ** outDec);
+                    const phIn   = Number(lvl.phAmount) / (10 ** outDec);
                     const sellPr = solOut / phIn;
                     if (sellPr >= Number(SELL_THRESHOLD)) {
                         console.log(`🔔 Цена >= ${sellPr.toFixed(9)} — grid#${i} SELL`);
