@@ -1,11 +1,12 @@
-// grid-swap-solana.js  (bulk‑BUY + bulk‑SELL + fee‑guard)
-
 import 'dotenv/config';
-import fs   from 'fs';
+import fs from 'fs';
 import path from 'path';
 import {
-    Connection, Keypair, PublicKey,
-    VersionedTransaction, Transaction
+    Connection,
+    Keypair,
+    PublicKey,
+    VersionedTransaction,
+    Transaction
 } from '@solana/web3.js';
 import {
     getMint,
@@ -13,206 +14,182 @@ import {
     createAssociatedTokenAccountInstruction
 } from '@solana/spl-token';
 
-/* ─── .env ─── */
 const {
     SOLANA_RPC_URL, KEYPAIR_PATH,
-    INPUT_MINT,     OUTPUT_MINT,
-    SLIPPAGE_BPS,   CHECK_INTERVAL,
-    GRID_LOWER,     GRID_UPPER,
-    GRID_STEPS,     SELL_THRESHOLD
+    INPUT_MINT, OUTPUT_MINT,
+    SLIPPAGE_BPS, CHECK_INTERVAL,
+    GRID_LOWER, GRID_UPPER,
+    GRID_STEPS, SELL_THRESHOLD
 } = process.env;
 
-/* ─── параметры стратегии ─── */
-const MIN_BUY_SOL             = 0.001;     // не меньше этой суммы
-const MAX_PRIORITY_LAMPORTS   = 20_000;    // 0.00002 SOL
-const RESERVE_SOL             = 0.01;      // запас на комиссии
-
-/* ─── state file ─── */
 const STATE_PATH = path.resolve('grid_state.json');
-function loadState(gridPrices){
-    let old=null; try{ old=JSON.parse(fs.readFileSync(STATE_PATH)); }catch{}
-    const levels = gridPrices.map(p=>({price:p,bought:false,phAmount:null}));
-    if(old?.levels){
-        for(const l of old.levels) if(l.bought){
-            const dst=levels.find(n=>Math.abs(n.price-l.price)<Number.EPSILON);
-            if(dst){ dst.bought=true; dst.phAmount=l.phAmount; }
+const logFilePath = path.resolve('grid_trade_log.csv');
+
+// Логирование данных о сделках
+function logTrade(action, price, amount, solBalance, phBalance) {
+    const timestamp = new Date().toLocaleString();
+    const logEntry = `${timestamp},${action},${price},${amount},${solBalance},${phBalance}\n`;
+
+    if (!fs.existsSync(logFilePath)) {
+        fs.writeFileSync(logFilePath, 'Timestamp,Action,Price,Solana Amount,PH Amount,Solana Balance,PH Balance\n');
+    }
+
+    fs.appendFileSync(logFilePath, logEntry);
+    console.log(`Logged: ${logEntry}`);
+}
+
+function loadState(gridPrices) {
+    let old = null;
+    try { old = JSON.parse(fs.readFileSync(STATE_PATH)); } catch {}
+    const levels = gridPrices.map(p => ({ price: p, bought: false, phAmount: null }));
+    if (old?.levels) {
+        for (const l of old.levels) if (l.bought) {
+            const dst = levels.find(n => Math.abs(n.price - l.price) < Number.EPSILON);
+            if (dst) { dst.bought = true; dst.phAmount = l.phAmount; }
         }
     }
-    fs.writeFileSync(STATE_PATH, JSON.stringify({levels},null,2));
-    return {levels};
-}
-const saveState=s=>fs.writeFileSync(STATE_PATH,JSON.stringify(s,null,2));
-
-class NodeWallet{
-    constructor(kp){ this.keypair=kp; this.publicKey=kp.publicKey; }
-    async signTransaction(tx){ tx.sign([this.keypair]); return tx; }
+    fs.writeFileSync(STATE_PATH, JSON.stringify({ levels }, null, 2));
+    return { levels };
 }
 
-/* ───────────────── MAIN ───────────────── */
-async function main(){
-    /* wallet / rpc */
+const saveState = s => fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
+
+class NodeWallet {
+    constructor(kp) { this.keypair = kp; this.publicKey = kp.publicKey; }
+    async signTransaction(tx) { tx.sign([this.keypair]); return tx; }
+}
+
+async function main() {
     const raw = JSON.parse(fs.readFileSync(KEYPAIR_PATH));
-    const kp  = Keypair.fromSecretKey(new Uint8Array(raw));
-    const w   = new NodeWallet(kp);
-    const cxn = new Connection(SOLANA_RPC_URL,'confirmed');
+    const kp = Keypair.fromSecretKey(new Uint8Array(raw));
+    const w = new NodeWallet(kp);
+    const cxn = new Connection(SOLANA_RPC_URL, 'confirmed');
 
-    /* grid */
-    const low=+GRID_LOWER, up=+GRID_UPPER, steps=+GRID_STEPS;
-    const gridPrices = Array.from({length:steps+1},(_,i)=>low+(up-low)*i/steps);
+    const low = Number(GRID_LOWER), up = Number(GRID_UPPER), steps = Number(GRID_STEPS);
+    const gridPrices = Array.from({ length: steps + 1 }, (_, i) => low + (up - low) * i / steps);
     const state = loadState(gridPrices);
-    console.log('Grid levels:', gridPrices.map(p=>p.toFixed(9)));
+    console.log('Grid levels:', gridPrices.map(p => p.toFixed(9)));
 
-    /* ensure ATA */
-    const outMint=new PublicKey(OUTPUT_MINT);
-    const ata    = await getAssociatedTokenAddress(outMint,w.publicKey);
-    if(!await cxn.getAccountInfo(ata)){
-        const ix=createAssociatedTokenAccountInstruction(w.publicKey,ata,w.publicKey,outMint);
-        const tx=new Transaction().add(ix);
-        tx.feePayer=w.publicKey;
-        tx.recentBlockhash=(await cxn.getLatestBlockhash()).blockhash;
-        tx.sign(kp); await cxn.sendRawTransaction(tx.serialize(),{skipPreflight:true});
-        console.log('✅ ATA created:',ata.toBase58());
-    }else console.log('✅ ATA exists:',ata.toBase58());
+    const outMint = new PublicKey(OUTPUT_MINT);
+    const ata = await getAssociatedTokenAddress(outMint, w.publicKey);
+    if (!await cxn.getAccountInfo(ata)) {
+        const ix = createAssociatedTokenAccountInstruction(w.publicKey, ata, w.publicKey, outMint);
+        const tx = new Transaction().add(ix);
+        tx.feePayer = w.publicKey;
+        tx.recentBlockhash = (await cxn.getLatestBlockhash()).blockhash;
+        tx.sign(kp);
+        await cxn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+        console.log('✅ ATA created:', ata.toBase58());
+    } else {
+        console.log('✅ ATA exists:', ata.toBase58());
+    }
 
-    const outMintInfo=await getMint(cxn,outMint);
+    const outMintInfo = await getMint(cxn, outMint);
     const outDec = outMintInfo.decimals;
-    const reserveLamports = BigInt(RESERVE_SOL*1e9);
+    const reserve = BigInt(0.01 * 1e9);
     let prevPrice = Infinity;
 
-    console.log(`\nStarting grid every ${CHECK_INTERVAL/1000}s\n`);
-    setInterval(trySwap, +CHECK_INTERVAL);
+    console.log(`\nStarting grid every ${CHECK_INTERVAL / 1000}s\n`);
 
-    /* ───────── core loop ───────── */
-    async function trySwap(){
+    setInterval(trySwap, Number(CHECK_INTERVAL));
+
+    async function trySwap() {
         const now = new Date().toLocaleTimeString();
-        try{
-            /* 0) текущая цена (quote на 0.001 SOL) */
-            const sampleAmt = 1_000_000n; // 0.001 SOL
-            const price = await getPrice(sampleAmt);
-            if(!price){ console.log(`[${now}] no price`); return; }
+        try {
+            const sampleAmt = 1_000_000n;
+            const sampleURL = new URL('https://lite-api.jup.ag/swap/v1/quote');
+            sampleURL.searchParams.set('inputMint', INPUT_MINT);
+            sampleURL.searchParams.set('outputMint', OUTPUT_MINT);
+            sampleURL.searchParams.set('amount', sampleAmt.toString());
+            sampleURL.searchParams.set('slippageBps', SLIPPAGE_BPS);
+            const sampleJ = await (await fetch(sampleURL)).json();
+            if (!sampleJ.routePlan?.length) { console.log(`[${now}] no price`); return; }
+            const curPrice = (Number(sampleAmt) / 1e9) / (Number(sampleJ.outAmount) / (10 ** outDec));
 
-            /* 1) балансы */
-            const solLam = await cxn.getBalance(w.publicKey,'confirmed');
-            const solBal = solLam/1e9;
-            const phRaw  = (await cxn.getTokenAccountBalance(ata)).value.amount;
-            const phBal  = Number(phRaw)/(10**outDec);
+            const solLam = await cxn.getBalance(w.publicKey, 'confirmed');
+            const solBal = solLam / 1e9;
+            const phRaw = (await cxn.getTokenAccountBalance(ata)).value.amount;
+            const phBal = Number(phRaw) / (10 ** outDec);
 
-            /* 2) капиталы */
-            const investedSOL = state.levels
-                .filter(l=>l.bought && l.phAmount)
-                .reduce((s,l)=>s + (Number(l.phAmount)/(10**outDec))*price ,0);
-            const totalValueSOL = solBal + phBal*price;
-            let   freeValueSOL  = totalValueSOL - investedSOL - RESERVE_SOL;
-            let   remain = steps - state.levels.filter(l=>l.bought).length;
+            const investedPhSOL = state.levels
+                .filter(l => l.bought && l.phAmount)
+                .reduce((sum, l) => sum + (Number(l.phAmount) / (10 ** outDec)) * curPrice, 0);
+            const totalValueSOL = solBal + phBal * curPrice;
+            const freeValueSOL = totalValueSOL - investedPhSOL - Number(reserve) / 1e9;
 
-            /* расчёт первого per‑grid */
-            let perGridLamports = calcPerGridLamports();
-            console.log(`[${now}] perGrid=${(Number(perGridLamports)/1e9).toFixed(6)} SOL | price=${price.toFixed(9)}`);
+            const remain = steps - state.levels.filter(l => l.bought).length;
+            const perGridLamports = remain > 0 && freeValueSOL > 0 ? BigInt(Math.floor((freeValueSOL / remain) * 1e9)) : 0n;
 
-            /* 3) BULK‑BUY: покупаем все уровни, которые пересекли */
-            if(perGridLamports>0n){
-                for(let i=0;i<gridPrices.length;i++){
-                    const lvl = state.levels[i];
-                    if(!lvl.bought && prevPrice>lvl.price && price<=lvl.price){
-                        // хватает ли ещё свободного капитала?
-                        if(perGridLamports===0n) break;
-                        console.log(`🔔 BUY grid#${i} @${lvl.price.toFixed(9)}`);
-                        const buyQ = await getQuote(INPUT_MINT,OUTPUT_MINT,perGridLamports);
-                        if(!buyQ){ console.log('   ↳ no route'); break; }
-                        const ok  = await execSwap(buyQ);
-                        if(!ok) break;                        // остановиться, если swap отклонён
-                        lvl.bought=true; lvl.phAmount=buyQ.outAmount;
-                        saveState(state);
+            console.log(`[${now}] Dynamic per-grid buy: ${(Number(perGridLamports) / 1e9).toFixed(6)} SOL`);
+            console.log(`[${now}] Balances: ${solBal.toFixed(6)} SOL | ${phBal.toFixed(3)} PH | price ${curPrice.toFixed(9)}`);
 
-                        // обновляем свободный капитал и пересчитываем объём
-                        freeValueSOL -= Number(perGridLamports)/1e9;
-                        remain--;
-                        perGridLamports = calcPerGridLamports();
+            if (perGridLamports > 0n) {
+                const buyURL = new URL(sampleURL);
+                buyURL.searchParams.set('amount', perGridLamports.toString());
+                const buyJ = await (await fetch(buyURL)).json();
+                if (buyJ.routePlan?.length) {
+                    const phOut = Number(buyJ.outAmount) / (10 ** outDec);
+                    const price = (Number(perGridLamports) / 1e9) / phOut;
+
+                    for (let i = 0; i < gridPrices.length; i++) {
+                        const lvl = state.levels[i];
+                        if (!lvl.bought && prevPrice > lvl.price && price <= lvl.price) {
+                            console.log(`🔔 Dropped through ${lvl.price.toFixed(9)} — grid#${i} BUY`);
+                            await execSwap(buyJ);
+                            lvl.bought = true;
+                            lvl.phAmount = buyJ.outAmount;
+                            saveState(state);
+                            break;
+                        }
                     }
+                    prevPrice = price;
                 }
-                prevPrice = price;
             }
 
-            /* 4) SELL лесенкой */
             const phBalRaw = BigInt((await cxn.getTokenAccountBalance(ata)).value.amount);
-            for(let i=0;i<state.levels.length-1;i++){
-                const lvl=state.levels[i];
-                if(lvl.bought && lvl.phAmount && phBalRaw>=BigInt(lvl.phAmount)){
-                    const sellJ = await getQuote(OUTPUT_MINT,INPUT_MINT,lvl.phAmount);
-                    if(!sellJ) continue;
-                    const solOut=Number(sellJ.outAmount)/1e9;
-                    const phIn  = Number(lvl.phAmount)/(10**outDec);
-                    if(solOut/phIn >= +SELL_THRESHOLD){
-                        console.log(`🔔 SELL grid#${i} price=${(solOut/phIn).toFixed(9)}`);
-                        const ok=await execSwap(sellJ);
-                        if(ok){ lvl.bought=false; lvl.phAmount=null; saveState(state); }
+            for (let i = 0; i < state.levels.length - 1; i++) {
+                const lvl = state.levels[i], next = state.levels[i + 1];
+                if (lvl.bought && lvl.phAmount && phBalRaw >= BigInt(lvl.phAmount)) {
+                    const sellURL = new URL('https://lite-api.jup.ag/swap/v1/quote');
+                    sellURL.searchParams.set('inputMint', OUTPUT_MINT);
+                    sellURL.searchParams.set('outputMint', INPUT_MINT);
+                    sellURL.searchParams.set('amount', lvl.phAmount);
+                    sellURL.searchParams.set('slippageBps', SLIPPAGE_BPS);
+                    const sellJ = await (await fetch(sellURL)).json();
+                    if (!sellJ.routePlan?.length) continue;
+                    const solOut = Number(sellJ.outAmount) / 1e9;
+                    const phIn = Number(lvl.phAmount) / (10 ** outDec);
+                    const sellPr = solOut / phIn;
+                    if (sellPr >= Number(SELL_THRESHOLD)) {
+                        console.log(`🔔 Price ≥ ${sellPr.toFixed(9)} — grid#${i} SELL`);
+                        await execSwap(sellJ);
+                        lvl.bought = false;
+                        lvl.phAmount = null;
+                        saveState(state);
                         break;
                     }
                 }
             }
-
-            /* 5) BULK‑SELL при пампе ≥ GRID_UPPER */
-            const toSellRaw = state.levels
-                .filter(l=>l.bought && l.phAmount)
-                .reduce((s,l)=> s+BigInt(l.phAmount),0n);
-
-            if(toSellRaw>0n && price>=+GRID_UPPER){
-                console.log(`🔔 Price ≥ GRID_UPPER (${GRID_UPPER}) — bulk‑SELL ALL`);
-                const bulkQ = await getQuote(OUTPUT_MINT,INPUT_MINT,toSellRaw);
-                if(bulkQ && await execSwap(bulkQ)){
-                    for(const l of state.levels){ l.bought=false; l.phAmount=null; }
-                    saveState(state);
-                    console.log(`✅ Bulk‑sold ${toSellRaw} raw units`);
-                }
-            }
-
-            /* helper для пересчёта perGridLamports */
-            function calcPerGridLamports(){
-                if(remain<=0) return 0n;
-                const v = freeValueSOL/remain;
-                return v<MIN_BUY_SOL ? 0n : BigInt(Math.floor(v*1e9));
-            }
-
-        }catch(e){ console.error(`[${now}] Error`,e); }
+        } catch (e) { console.error(`[${now}] Error:`, e); }
     }
 
-    /* ─────── helpers ─────── */
-    async function getQuote(inMint,outMint,amt){
-        if(amt===0n) return null;
-        const u = new URL('https://lite-api.jup.ag/swap/v1/quote');
-        u.searchParams.set('inputMint',inMint);
-        u.searchParams.set('outputMint',outMint);
-        u.searchParams.set('amount',amt.toString());
-        u.searchParams.set('slippageBps',SLIPPAGE_BPS);
-        const j = await (await fetch(u)).json();
-        return j.routePlan?.length ? j : null;
-    }
-    async function getPrice(sampleAmt){
-        const q = await getQuote(INPUT_MINT,OUTPUT_MINT,sampleAmt);
-        return q ? (Number(sampleAmt)/1e9)/(Number(q.outAmount)/(10**outDec)) : null;
-    }
-    async function execSwap(qJson){
-        const res = await fetch('https://lite-api.jup.ag/swap/v1/swap',{
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                quoteResponse:qJson,
-                userPublicKey:w.publicKey.toBase58(),
-                wrapUnwrapSOL:true,
-                computeUnitPriceMicroLamports:0
+    async function execSwap(quoteJson) {
+        const res = await fetch('https://lite-api.jup.ag/swap/v1/swap', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                quoteResponse: quoteJson,
+                userPublicKey: w.publicKey.toBase58(),
+                wrapUnwrapSOL: true,
+                computeUnitPriceMicroLamports: 0
             })
         });
         const j = await res.json();
-        if(j.prioritizationFeeLamports>MAX_PRIORITY_LAMPORTS){
-            console.log('   ↳ skip swap: high priority fee',j.prioritizationFeeLamports);
-            return false;
-        }
-        const tx  = VersionedTransaction.deserialize(Buffer.from(j.swapTransaction,'base64'));
+        const tx = VersionedTransaction.deserialize(Buffer.from(j.swapTransaction, 'base64'));
         await w.signTransaction(tx);
         const sig = await cxn.sendRawTransaction(tx.serialize());
         await cxn.confirmTransaction(sig);
-        console.log('   ↳ tx:',sig);
-        return true;
+        console.log(`   ↳ tx: ${sig}`);
     }
 }
 
-main().catch(e=>{ console.error('Fatal',e); process.exit(1); });
+main().catch(e => { console.error('Fatal', e); process.exit(1); });
