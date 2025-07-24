@@ -10,7 +10,7 @@ import {
     getAssociatedTokenAddress,
     createAssociatedTokenAccountInstruction
 } from '@solana/spl-token';
-import logAndSendMessage from './bot.js'; // Импортируем функцию для логирования
+import {logAndSendMessage} from './bot.js'; // Импортируем функцию для логирования
 
 /* ─── Конфигурация из .env ─── */
 const {
