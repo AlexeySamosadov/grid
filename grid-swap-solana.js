@@ -1,4 +1,5 @@
-// grid-swap-solana.js
+// grid-swap-solana.js  (bulk‑BUY + bulk‑SELL + fee‑guard)
+
 import 'dotenv/config';
 import fs   from 'fs';
 import path from 'path';
@@ -12,7 +13,7 @@ import {
     createAssociatedTokenAccountInstruction
 } from '@solana/spl-token';
 
-/* ──────────────── .env ──────────────── */
+/* ─── .env ─── */
 const {
     SOLANA_RPC_URL, KEYPAIR_PATH,
     INPUT_MINT,     OUTPUT_MINT,
@@ -21,12 +22,12 @@ const {
     GRID_STEPS,     SELL_THRESHOLD
 } = process.env;
 
-/* ───────── Параметры стратегии ───────── */
-const MIN_BUY_SOL             = 0.001;     // не делаем микросвапы
+/* ─── параметры стратегии ─── */
+const MIN_BUY_SOL             = 0.001;     // не меньше этой суммы
 const MAX_PRIORITY_LAMPORTS   = 20_000;    // 0.00002 SOL
-const RESERVE_SOL             = 0.01;      // на комиссии
+const RESERVE_SOL             = 0.01;      // запас на комиссии
 
-/* ───────── state file ───────── */
+/* ─── state file ─── */
 const STATE_PATH = path.resolve('grid_state.json');
 function loadState(gridPrices){
     let old=null; try{ old=JSON.parse(fs.readFileSync(STATE_PATH)); }catch{}
@@ -91,45 +92,45 @@ async function main(){
             if(!price){ console.log(`[${now}] no price`); return; }
 
             /* 1) балансы */
-            const solLam   = await cxn.getBalance(w.publicKey,'confirmed');
-            const solBal   = solLam/1e9;
-            const phRaw    = (await cxn.getTokenAccountBalance(ata)).value.amount;
-            const phBal    = Number(phRaw)/(10**outDec);
+            const solLam = await cxn.getBalance(w.publicKey,'confirmed');
+            const solBal = solLam/1e9;
+            const phRaw  = (await cxn.getTokenAccountBalance(ata)).value.amount;
+            const phBal  = Number(phRaw)/(10**outDec);
 
-            /* 2) портфель и свободный капитал */
+            /* 2) капиталы */
             const investedSOL = state.levels
                 .filter(l=>l.bought && l.phAmount)
                 .reduce((s,l)=>s + (Number(l.phAmount)/(10**outDec))*price ,0);
             const totalValueSOL = solBal + phBal*price;
-            const freeValueSOL  = totalValueSOL - investedSOL - RESERVE_SOL;
-            const remain = steps - state.levels.filter(l=>l.bought).length;
-            let perGridLamports = 0n;
-            if(remain>0 && freeValueSOL>MIN_BUY_SOL){
-                perGridLamports = BigInt(Math.floor((freeValueSOL/remain)*1e9));
-                if(Number(perGridLamports)/1e9 < MIN_BUY_SOL) perGridLamports = 0n;
-            }
+            let   freeValueSOL  = totalValueSOL - investedSOL - RESERVE_SOL;
+            let   remain = steps - state.levels.filter(l=>l.bought).length;
 
+            /* расчёт первого per‑grid */
+            let perGridLamports = calcPerGridLamports();
             console.log(`[${now}] perGrid=${(Number(perGridLamports)/1e9).toFixed(6)} SOL | price=${price.toFixed(9)}`);
 
-            /* 3) BUY */
+            /* 3) BULK‑BUY: покупаем все уровни, которые пересекли */
             if(perGridLamports>0n){
-                const buyJ = await getQuote(INPUT_MINT,OUTPUT_MINT,perGridLamports);
-                if(buyJ){
-                    const phOut = Number(buyJ.outAmount)/(10**outDec);
-                    const buyPrice = (Number(perGridLamports)/1e9)/phOut;
-                    for(let i=0;i<gridPrices.length;i++){
-                        const lvl=state.levels[i];
-                        if(!lvl.bought && prevPrice>lvl.price && buyPrice<=lvl.price){
-                            console.log(`🔔 Dropped through ${lvl.price.toFixed(9)} — grid#${i} BUY`);
-                            const ok=await execSwap(buyJ);
-                            if(ok){
-                                lvl.bought=true; lvl.phAmount=buyJ.outAmount; saveState(state);
-                            }
-                            break;
-                        }
+                for(let i=0;i<gridPrices.length;i++){
+                    const lvl = state.levels[i];
+                    if(!lvl.bought && prevPrice>lvl.price && price<=lvl.price){
+                        // хватает ли ещё свободного капитала?
+                        if(perGridLamports===0n) break;
+                        console.log(`🔔 BUY grid#${i} @${lvl.price.toFixed(9)}`);
+                        const buyQ = await getQuote(INPUT_MINT,OUTPUT_MINT,perGridLamports);
+                        if(!buyQ){ console.log('   ↳ no route'); break; }
+                        const ok  = await execSwap(buyQ);
+                        if(!ok) break;                        // остановиться, если swap отклонён
+                        lvl.bought=true; lvl.phAmount=buyQ.outAmount;
+                        saveState(state);
+
+                        // обновляем свободный капитал и пересчитываем объём
+                        freeValueSOL -= Number(perGridLamports)/1e9;
+                        remain--;
+                        perGridLamports = calcPerGridLamports();
                     }
-                    prevPrice=buyPrice;
                 }
+                prevPrice = price;
             }
 
             /* 4) SELL лесенкой */
@@ -142,7 +143,7 @@ async function main(){
                     const solOut=Number(sellJ.outAmount)/1e9;
                     const phIn  = Number(lvl.phAmount)/(10**outDec);
                     if(solOut/phIn >= +SELL_THRESHOLD){
-                        console.log(`🔔 Price ≥ ${sellJ.outAmountSolPrice?.toFixed?.(9)||'?'} — grid#${i} SELL`);
+                        console.log(`🔔 SELL grid#${i} price=${(solOut/phIn).toFixed(9)}`);
                         const ok=await execSwap(sellJ);
                         if(ok){ lvl.bought=false; lvl.phAmount=null; saveState(state); }
                         break;
@@ -150,22 +151,26 @@ async function main(){
                 }
             }
 
-            /* 5) BULK‑SELL при цене ≥ GRID_UPPER */
+            /* 5) BULK‑SELL при пампе ≥ GRID_UPPER */
             const toSellRaw = state.levels
                 .filter(l=>l.bought && l.phAmount)
                 .reduce((s,l)=> s+BigInt(l.phAmount),0n);
 
             if(toSellRaw>0n && price>=+GRID_UPPER){
-                console.log(`🔔 Price ≥ GRID_UPPER (${GRID_UPPER}) — bulk‑sell ALL`);
-                const bulkJ = await getQuote(OUTPUT_MINT,INPUT_MINT,toSellRaw);
-                if(bulkJ){
-                    const ok=await execSwap(bulkJ);
-                    if(ok){
-                        for(const l of state.levels){ l.bought=false; l.phAmount=null; }
-                        saveState(state);
-                        console.log(`✅ Bulk‑sold ${toSellRaw} raw units`);
-                    }
+                console.log(`🔔 Price ≥ GRID_UPPER (${GRID_UPPER}) — bulk‑SELL ALL`);
+                const bulkQ = await getQuote(OUTPUT_MINT,INPUT_MINT,toSellRaw);
+                if(bulkQ && await execSwap(bulkQ)){
+                    for(const l of state.levels){ l.bought=false; l.phAmount=null; }
+                    saveState(state);
+                    console.log(`✅ Bulk‑sold ${toSellRaw} raw units`);
                 }
+            }
+
+            /* helper для пересчёта perGridLamports */
+            function calcPerGridLamports(){
+                if(remain<=0) return 0n;
+                const v = freeValueSOL/remain;
+                return v<MIN_BUY_SOL ? 0n : BigInt(Math.floor(v*1e9));
             }
 
         }catch(e){ console.error(`[${now}] Error`,e); }
@@ -173,6 +178,7 @@ async function main(){
 
     /* ─────── helpers ─────── */
     async function getQuote(inMint,outMint,amt){
+        if(amt===0n) return null;
         const u = new URL('https://lite-api.jup.ag/swap/v1/quote');
         u.searchParams.set('inputMint',inMint);
         u.searchParams.set('outputMint',outMint);
@@ -182,8 +188,8 @@ async function main(){
         return j.routePlan?.length ? j : null;
     }
     async function getPrice(sampleAmt){
-        const j = await getQuote(INPUT_MINT,OUTPUT_MINT,sampleAmt);
-        return j ? (Number(sampleAmt)/1e9)/(Number(j.outAmount)/(10**outDec)) : null;
+        const q = await getQuote(INPUT_MINT,OUTPUT_MINT,sampleAmt);
+        return q ? (Number(sampleAmt)/1e9)/(Number(q.outAmount)/(10**outDec)) : null;
     }
     async function execSwap(qJson){
         const res = await fetch('https://lite-api.jup.ag/swap/v1/swap',{
@@ -195,14 +201,14 @@ async function main(){
                 computeUnitPriceMicroLamports:0
             })
         });
-        const j=await res.json();
+        const j = await res.json();
         if(j.prioritizationFeeLamports>MAX_PRIORITY_LAMPORTS){
-            console.log('↳ swap skipped: high priority fee',j.prioritizationFeeLamports);
+            console.log('   ↳ skip swap: high priority fee',j.prioritizationFeeLamports);
             return false;
         }
-        const tx=VersionedTransaction.deserialize(Buffer.from(j.swapTransaction,'base64'));
+        const tx  = VersionedTransaction.deserialize(Buffer.from(j.swapTransaction,'base64'));
         await w.signTransaction(tx);
-        const sig=await cxn.sendRawTransaction(tx.serialize());
+        const sig = await cxn.sendRawTransaction(tx.serialize());
         await cxn.confirmTransaction(sig);
         console.log('   ↳ tx:',sig);
         return true;
