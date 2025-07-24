@@ -102,11 +102,15 @@ async function main() {
             }
             const curPrice = (Number(sampleAmt) / 1e9) / (Number(sampleJ.outAmount) / (10 ** outDec));
 
+            console.log(`[${now}] Актуальная цена: ${curPrice.toFixed(9)} SOL/PH`);
+
             // --- Шаг 2: Балансы ---
             const solLam = await cxn.getBalance(w.publicKey, 'confirmed');
             const solBal = solLam / 1e9;
             const phRaw = (await cxn.getTokenAccountBalance(ata)).value.amount;
             const phBal = Number(phRaw) / (10 ** outDec);
+
+            console.log(`[${now}] Балансы: SOL ${solBal.toFixed(6)} | PH ${phBal.toFixed(3)}`);
 
             // --- Шаг 3: Портфель и свободный капитал ---
             const investedPhSOL = state.levels
@@ -114,6 +118,8 @@ async function main() {
                 .reduce((sum, l) => sum + (Number(l.phAmount) / (10 ** outDec)) * curPrice, 0);
             const totalValueSOL = solBal + phBal * curPrice;
             const freeValueSOL = totalValueSOL - investedPhSOL - Number(commissionReserve) / 1e9;
+
+            console.log(`[${now}] Свободные средства для покупки: ${freeValueSOL.toFixed(6)} SOL`);
 
             // --- Шаг 4: Свободные средства для покупки ---
             const remain = steps - state.levels.filter(l => l.bought).length;
@@ -128,7 +134,7 @@ async function main() {
             }
 
             console.log(`[${now}] Dynamic per-grid buy: ${(Number(perGridLamports) / 1e9).toFixed(6)} SOL`);
-            console.log(`[${now}] Balances: ${solBal.toFixed(6)} SOL | ${phBal.toFixed(3)} PH | price ${curPrice.toFixed(9)}`);
+            console.log(`[${now}] Балансы: ${solBal.toFixed(6)} SOL | ${phBal.toFixed(3)} PH | цена ${curPrice.toFixed(9)}`);
 
             // Если на балансе недостаточно средств для покупки или всё куплено — только продажи
             if (perGridLamports > 0n) {
