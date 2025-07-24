@@ -38,6 +38,7 @@ function loadState(gridPrices) {
     fs.writeFileSync(STATE_PATH, JSON.stringify({ levels }, null, 2));
     return { levels };
 }
+
 const saveState = s => fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
 
 /* ─── Маленький адаптер для кошелька ─── */
@@ -46,21 +47,33 @@ class NodeWallet {
     async signTransaction(tx) { tx.sign([this.keypair]); return tx; }
 }
 
+/* ─── Логирование сделок ─── */
+const logFilePath = path.resolve('grid_trade_log.csv');
+
+function logTrade(action, price, amount, solBalance, phBalance) {
+    const timestamp = new Date().toLocaleString();
+    const logEntry = `${timestamp},${action},${price},${amount},${solBalance},${phBalance}\n`;
+
+    if (!fs.existsSync(logFilePath)) {
+        fs.writeFileSync(logFilePath, 'Timestamp,Action,Price,Amount,Solana Balance,PH Balance\n');
+    }
+
+    fs.appendFileSync(logFilePath, logEntry);
+    console.log(`Logged: ${logEntry}`);
+}
+
 /* ─── MAIN ЛОГИКА ─── */
 async function main() {
-    /* 1) RPC и кошелёк */
     const raw = JSON.parse(fs.readFileSync(KEYPAIR_PATH));
     const kp = Keypair.fromSecretKey(new Uint8Array(raw));
     const w = new NodeWallet(kp);
     const cxn = new Connection(SOLANA_RPC_URL, 'confirmed');
 
-    /* 2) Уровни грида */
     const low = Number(GRID_LOWER), up = Number(GRID_UPPER), steps = Number(GRID_STEPS);
     const gridPrices = Array.from({ length: steps + 1 }, (_, i) => low + (up - low) * i / steps);
     const state = loadState(gridPrices);
     console.log('Grid levels:', gridPrices.map(p => p.toFixed(9)));
 
-    /* 3) Убедиться в наличии ATA */
     const outMint = new PublicKey(OUTPUT_MINT);
     const ata = await getAssociatedTokenAddress(outMint, w.publicKey);
     if (!await cxn.getAccountInfo(ata)) {
@@ -71,7 +84,9 @@ async function main() {
         tx.sign(kp);
         await cxn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
         console.log('✅ ATA created:', ata.toBase58());
-    } else console.log('✅ ATA exists:', ata.toBase58());
+    } else {
+        console.log('✅ ATA exists:', ata.toBase58());
+    }
 
     const outMintInfo = await getMint(cxn, outMint);
     const outDec = outMintInfo.decimals;
@@ -82,7 +97,6 @@ async function main() {
     let prevPrice = Infinity;
     console.log(`\nStarting grid every ${CHECK_INTERVAL / 1000}s\n`);
 
-    /* ─── Основной цикл ─── */
     setInterval(trySwap, Number(CHECK_INTERVAL));
 
     async function trySwap() {
