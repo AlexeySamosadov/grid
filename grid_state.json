@@ -1,0 +1,159 @@
+{
+  "levels": [
+    {
+      "price": 6e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.1e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.2e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.3e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.4e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.5e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.599999999999999e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.699999999999999e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.8e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 6.9e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 7e-7,
+      "bought": true,
+      "phAmount": "16058856520"
+    },
+    {
+      "price": 7.1e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 7.2e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 7.3e-7,
+      "bought": true,
+      "phAmount": "15248060420"
+    },
+    {
+      "price": 7.399999999999999e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 7.5e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 7.599999999999999e-7,
+      "bought": true,
+      "phAmount": "17503626779"
+    },
+    {
+      "price": 7.699999999999999e-7,
+      "bought": true,
+      "phAmount": "17499703942"
+    },
+    {
+      "price": 7.799999999999999e-7,
+      "bought": true,
+      "phAmount": "17495782423"
+    },
+    {
+      "price": 7.9e-7,
+      "bought": true,
+      "phAmount": "17491862223"
+    },
+    {
+      "price": 8e-7,
+      "bought": true,
+      "phAmount": "176066458507"
+    },
+    {
+      "price": 8.1e-7,
+      "bought": true,
+      "phAmount": "15145176045"
+    },
+    {
+      "price": 8.2e-7,
+      "bought": true,
+      "phAmount": "14634989484"
+    },
+    {
+      "price": 8.3e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 8.4e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 8.499999999999999e-7,
+      "bought": true,
+      "phAmount": "175671196388"
+    },
+    {
+      "price": 8.6e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 8.699999999999999e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 8.799999999999999e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 8.9e-7,
+      "bought": false,
+      "phAmount": null
+    },
+    {
+      "price": 9e-7,
+      "bought": true,
+      "phAmount": "174430585363"
+    }
+  ]
+}
