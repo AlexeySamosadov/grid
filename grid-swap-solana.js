@@ -174,7 +174,7 @@ async function main(){
     async function execSwap(quoteJson){
         const res = await fetch('https://lite-api.jup.ag/swap/v1/swap',{
             method:'POST', headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({quoteResponse:quoteJson,userPublicKey:w.publicKey.toBase58(),wrapUnwrapSOL:true})
+            body:JSON.stringify({quoteResponse:quoteJson,userPublicKey:w.publicKey.toBase58(),wrapUnwrapSOL:true, computeUnitPriceMicroLamports: 0 })
         });
         const j   = await res.json();
         const tx  = VersionedTransaction.deserialize(Buffer.from(j.swapTransaction,'base64'));
