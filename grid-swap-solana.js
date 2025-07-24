@@ -10,7 +10,7 @@ import {
     getAssociatedTokenAddress,
     createAssociatedTokenAccountInstruction
 } from '@solana/spl-token';
-import { logAndSendMessage } from './bot.js'; // Импортируем функцию логирования
+import logAndSendMessage from './logAndSendMessage'; // Импортируем функцию для логирования
 
 /* ─── Конфигурация из .env ─── */
 const {
@@ -48,6 +48,11 @@ class NodeWallet {
     async signTransaction(tx) { tx.sign([this.keypair]); return tx; }
 }
 
+// Проверка на NaN и корректность значения
+function isValidNumber(value) {
+    return !isNaN(value) && value !== null && value !== undefined;
+}
+
 /* ─── Логирование сделок ─── */
 const logFilePath = path.resolve('grid_trade_log.csv');
 
@@ -60,7 +65,7 @@ function logTrade(action, price, amount, solBalance, phBalance) {
     }
 
     fs.appendFileSync(logFilePath, logEntry);
-    logAndSendMessage(`Logged: ${logEntry}`); // Отправляем лог в Telegram
+    logAndSendMessage(`Logged: ${logEntry}`);
 }
 
 /* ─── MAIN ЛОГИКА ─── */
@@ -73,7 +78,7 @@ async function main() {
     const low = Number(GRID_LOWER), up = Number(GRID_UPPER), steps = Number(GRID_STEPS);
     const gridPrices = Array.from({ length: steps + 1 }, (_, i) => low + (up - low) * i / steps);
     const state = loadState(gridPrices);
-    logAndSendMessage(`Grid levels: ${gridPrices.map(p => p.toFixed(9))}`);
+    logAndSendMessage('Grid levels: ' + gridPrices.map(p => p.toFixed(9)).join(', '));
 
     const outMint = new PublicKey(OUTPUT_MINT);
     const ata = await getAssociatedTokenAddress(outMint, w.publicKey);
@@ -84,9 +89,9 @@ async function main() {
         tx.recentBlockhash = (await cxn.getLatestBlockhash()).blockhash;
         tx.sign(kp);
         await cxn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-        logAndSendMessage(`✅ ATA created: ${ata.toBase58()}`);
+        logAndSendMessage('✅ ATA created: ' + ata.toBase58());
     } else {
-        logAndSendMessage(`✅ ATA exists: ${ata.toBase58()}`);
+        logAndSendMessage('✅ ATA exists: ' + ata.toBase58());
     }
 
     const outMintInfo = await getMint(cxn, outMint);
@@ -103,8 +108,7 @@ async function main() {
     async function trySwap() {
         const now = new Date().toLocaleTimeString();
         try {
-            // --- Шаг 1: Узнаём актуальную цену ---
-            const sampleAmt = 1_000_000n; // 0.001 SOL
+            const sampleAmt = 1_000_000n;
             const sampleURL = new URL('https://lite-api.jup.ag/swap/v1/quote');
             sampleURL.searchParams.set('inputMint', INPUT_MINT);
             sampleURL.searchParams.set('outputMint', OUTPUT_MINT);
@@ -116,18 +120,14 @@ async function main() {
                 return;
             }
             const curPrice = (Number(sampleAmt) / 1e9) / (Number(sampleJ.outAmount) / (10 ** outDec));
-
             logAndSendMessage(`[${now}] Актуальная цена: ${curPrice.toFixed(9)} SOL/PH`);
 
-            // --- Шаг 2: Балансы ---
             const solLam = await cxn.getBalance(w.publicKey, 'confirmed');
             const solBal = solLam / 1e9;
             const phRaw = (await cxn.getTokenAccountBalance(ata)).value.amount;
             const phBal = Number(phRaw) / (10 ** outDec);
-
             logAndSendMessage(`[${now}] Балансы: SOL ${solBal.toFixed(6)} | PH ${phBal.toFixed(3)}`);
 
-            // --- Шаг 3: Портфель и свободный капитал ---
             const investedPhSOL = state.levels
                 .filter(l => l.bought && l.phAmount)
                 .reduce((sum, l) => sum + (Number(l.phAmount) / (10 ** outDec)) * curPrice, 0);
@@ -136,11 +136,9 @@ async function main() {
 
             logAndSendMessage(`[${now}] Свободные средства для покупки: ${freeValueSOL.toFixed(6)} SOL`);
 
-            // --- Шаг 4: Свободные средства для покупки ---
             const remain = steps - state.levels.filter(l => l.bought).length;
             let perGridLamports = 0n;
 
-            // Если цена упала, определяем, сколько ячеек можно купить
             const priceDiff = prevPrice - curPrice;
             const gridsToBuy = Math.floor(priceDiff / (gridPrices[1] - gridPrices[0]));
             if (gridsToBuy > 0 && freeValueSOL > commissionReserve) {
@@ -151,9 +149,7 @@ async function main() {
             logAndSendMessage(`[${now}] Dynamic per-grid buy: ${(Number(perGridLamports) / 1e9).toFixed(6)} SOL`);
             logAndSendMessage(`[${now}] Балансы: ${solBal.toFixed(6)} SOL | ${phBal.toFixed(3)} PH | цена ${curPrice.toFixed(9)}`);
 
-            // Если на балансе недостаточно средств для покупки или всё куплено — только продажи
             if (perGridLamports > 0n) {
-                // --- Шаг 5: Покупка с новым объёмом ---
                 const buyURL = new URL(sampleURL);
                 buyURL.searchParams.set('amount', perGridLamports.toString());
                 const buyJ = await (await fetch(buyURL)).json();
@@ -161,7 +157,6 @@ async function main() {
                     const phOut = Number(buyJ.outAmount) / (10 ** outDec);
                     const price = (Number(perGridLamports) / 1e9) / phOut;
 
-                    // Покупка по цене
                     for (let i = 0; i < gridPrices.length; i++) {
                         const lvl = state.levels[i];
                         if (!lvl.bought && prevPrice > lvl.price && price <= lvl.price) {
@@ -176,45 +171,21 @@ async function main() {
                     prevPrice = price;
                 }
             }
-
-            // --- Шаг 6: Логика продажи (как раньше) ---
-            const phBalRaw = BigInt((await cxn.getTokenAccountBalance(ata)).value.amount);
-            for (let i = 0; i < state.levels.length - 1; i++) {
-                const lvl = state.levels[i], next = state.levels[i + 1];
-                if (lvl.bought && lvl.phAmount && phBalRaw >= BigInt(lvl.phAmount)) {
-                    const sellURL = new URL('https://lite-api.jup.ag/swap/v1/quote');
-                    sellURL.searchParams.set('inputMint', OUTPUT_MINT);
-                    sellURL.searchParams.set('outputMint', INPUT_MINT);
-                    sellURL.searchParams.set('amount', lvl.phAmount);
-                    sellURL.searchParams.set('slippageBps', SLIPPAGE_BPS);
-                    const sellJ = await (await fetch(sellURL)).json();
-                    if (!sellJ.routePlan?.length) continue;
-                    const solOut = Number(sellJ.outAmount) / 1e9;
-                    const phIn = Number(lvl.phAmount) / (10 ** outDec);
-                    const sellPr = solOut / phIn;
-                    if (sellPr >= Number(SELL_THRESHOLD)) {
-                        logAndSendMessage(`🔔 Цена >= ${sellPr.toFixed(9)} — grid#${i} SELL`);
-                        await execSwap(sellJ);
-                        lvl.bought = false;
-                        lvl.phAmount = null;
-                        saveState(state);
-                        break;
-                    }
-                }
-            }
-
         } catch (e) {
-            console.error(`[${now}] Ошибка:`, e);
             logAndSendMessage(`[${now}] Ошибка: ${e.message}`);
         }
     }
 
-    // Функция для выполнения swap
     async function execSwap(quoteJson) {
         const res = await fetch('https://lite-api.jup.ag/swap/v1/swap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ quoteResponse: quoteJson, userPublicKey: w.publicKey.toBase58(), wrapUnwrapSOL: true, computeUnitPriceMicroLamports: 0 })
+            body: JSON.stringify({
+                quoteResponse: quoteJson,
+                userPublicKey: w.publicKey.toBase58(),
+                wrapUnwrapSOL: true,
+                computeUnitPriceMicroLamports: 0
+            })
         });
         const j = await res.json();
         const tx = VersionedTransaction.deserialize(Buffer.from(j.swapTransaction, 'base64'));
@@ -226,6 +197,6 @@ async function main() {
 }
 
 main().catch(e => {
-    console.error('Fatal', e);
+    logAndSendMessage('Fatal: ' + e.message);
     process.exit(1);
 });
