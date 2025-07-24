@@ -1,62 +1,73 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
-import {
-    Connection, Keypair, PublicKey,
-    VersionedTransaction, Transaction
-} from '@solana/web3.js';
-import {
-    getMint,
-    getAssociatedTokenAddress,
-    createAssociatedTokenAccountInstruction
-} from '@solana/spl-token';
-import { logAndSendMessage } from './bot.js'; // Импортируем функцию для логирования
+import { Connection, Keypair, PublicKey, VersionedTransaction, Transaction } from '@solana/web3.js';
+import { getMint, getAssociatedTokenAddress, createAssociatedTokenAccountInstruction } from '@solana/spl-token';
+import { config } from './config';
+import { logAndSendMessage } from './bot'; // Импортируем функцию для логирования
 
-/* ─── Конфигурация из .env ─── */
-const {
-    SOLANA_RPC_URL, KEYPAIR_PATH,
-    INPUT_MINT, OUTPUT_MINT,
-    SLIPPAGE_BPS, CHECK_INTERVAL,
-    GRID_LOWER, GRID_UPPER,
-    GRID_STEPS, SELL_THRESHOLD,
-    COMMISSION_RESERVE_MULTIPLIER // Множитель для комиссии
-} = process.env;
+// Типы для состояния грида
+interface GridLevel {
+    price: number;
+    bought: boolean;
+    phAmount: string | null;
+}
 
-/* ─── Путь к файлу состояния грида ─── */
+// Путь к файлу состояния грида
 const STATE_PATH = path.resolve('grid_state.json');
 
-/* ─── Функции для загрузки и сохранения состояния ─── */
-function loadState(gridPrices) {
+// Функция для загрузки состояния
+function loadState(gridPrices: number[]): { levels: GridLevel[] } {
     let old = null;
-    try { old = JSON.parse(fs.readFileSync(STATE_PATH)); } catch {}
-    const levels = gridPrices.map(p => ({ price: p, bought: false, phAmount: null }));
+    try {
+        old = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    } catch (e) {
+        console.log('Не удалось загрузить состояние грида', e);
+    }
+
+    const levels: GridLevel[] = gridPrices.map(p => ({ price: p, bought: false, phAmount: null }));
     if (old?.levels) {
-        for (const l of old.levels) if (l.bought) {
-            const dst = levels.find(n => Math.abs(n.price - l.price) < Number.EPSILON);
-            if (dst) { dst.bought = true; dst.phAmount = l.phAmount; }
+        for (const l of old.levels) {
+            if (l.bought) {
+                const dst = levels.find(n => Math.abs(n.price - l.price) < Number.EPSILON);
+                if (dst) {
+                    dst.bought = true;
+                    dst.phAmount = l.phAmount;
+                }
+            }
         }
     }
     fs.writeFileSync(STATE_PATH, JSON.stringify({ levels }, null, 2));
     return { levels };
 }
 
-const saveState = s => fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
+const saveState = (state: { levels: GridLevel[] }) => fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
 
-/* ─── Маленький адаптер для кошелька ─── */
+// Адаптер для кошелька
 class NodeWallet {
-    constructor(kp) { this.keypair = kp; this.publicKey = kp.publicKey; }
-    async signTransaction(tx) { tx.sign([this.keypair]); return tx; }
+    keypair: Keypair;
+    publicKey: PublicKey;
+
+    constructor(kp: Keypair) {
+        this.keypair = kp;
+        this.publicKey = kp.publicKey;
+    }
+
+    async signTransaction(tx: VersionedTransaction) {
+        tx.sign([this.keypair]);
+        return tx;
+    }
 }
 
-// Проверка на NaN и корректность значения
-function isValidNumber(value) {
+// Проверка на NaN
+function isValidNumber(value: any): boolean {
     return !isNaN(value) && value !== null && value !== undefined;
 }
 
-/* ─── Логирование сделок ─── */
+// Логирование сделок
 const logFilePath = path.resolve('grid_trade_log.csv');
 
-function logTrade(action, price, amount, solBalance, phBalance) {
+function logTrade(action: string, price: number, amount: string, solBalance: number, phBalance: number) {
     const timestamp = new Date().toLocaleString();
     const logEntry = `${timestamp},${action},${price},${amount},${solBalance},${phBalance}\n`;
 
@@ -68,19 +79,19 @@ function logTrade(action, price, amount, solBalance, phBalance) {
     logAndSendMessage(`Logged: ${logEntry}`);
 }
 
-/* ─── MAIN ЛОГИКА ─── */
+// Основная логика
 async function main() {
-    const raw = JSON.parse(fs.readFileSync(KEYPAIR_PATH));
+    const raw = JSON.parse(fs.readFileSync(config.KEYPAIR_PATH, 'utf8'));
     const kp = Keypair.fromSecretKey(new Uint8Array(raw));
     const w = new NodeWallet(kp);
-    const cxn = new Connection(SOLANA_RPC_URL, 'confirmed');
+    const cxn = new Connection(config.SOLANA_RPC_URL, 'confirmed');
 
-    const low = Number(GRID_LOWER), up = Number(GRID_UPPER), steps = Number(GRID_STEPS);
+    const low = config.GRID_LOWER, up = config.GRID_UPPER, steps = config.GRID_STEPS;
     const gridPrices = Array.from({ length: steps + 1 }, (_, i) => low + (up - low) * i / steps);
     const state = loadState(gridPrices);
     logAndSendMessage('Grid levels: ' + gridPrices.map(p => p.toFixed(9)).join(', '));
 
-    const outMint = new PublicKey(OUTPUT_MINT);
+    const outMint = new PublicKey(config.OUTPUT_MINT);
     const ata = await getAssociatedTokenAddress(outMint, w.publicKey);
     if (!await cxn.getAccountInfo(ata)) {
         const ix = createAssociatedTokenAccountInstruction(w.publicKey, ata, w.publicKey, outMint);
@@ -97,23 +108,22 @@ async function main() {
     const outMintInfo = await getMint(cxn, outMint);
     const outDec = outMintInfo.decimals;
 
-    // Резерв на комиссию для 30 ячеек
-    const commissionReserve = COMMISSION_RESERVE_MULTIPLIER * GRID_STEPS * Number(0.01); // Рассчитываем резерв для 30 ячеек
+    const commissionReserve = config.COMMISSION_RESERVE_MULTIPLIER * config.GRID_STEPS * Number(0.01); // Рассчитываем резерв для 30 ячеек
 
     let prevPrice = Infinity;
-    logAndSendMessage(`\nStarting grid every ${CHECK_INTERVAL / 1000}s\n`);
+    logAndSendMessage(`\nStarting grid every ${config.CHECK_INTERVAL / 1000}s\n`);
 
-    setInterval(trySwap, Number(CHECK_INTERVAL));
+    setInterval(trySwap, Number(config.CHECK_INTERVAL));
 
     async function trySwap() {
         const now = new Date().toLocaleTimeString();
         try {
             const sampleAmt = 1_000_000n;
             const sampleURL = new URL('https://lite-api.jup.ag/swap/v1/quote');
-            sampleURL.searchParams.set('inputMint', INPUT_MINT);
-            sampleURL.searchParams.set('outputMint', OUTPUT_MINT);
+            sampleURL.searchParams.set('inputMint', config.INPUT_MINT);
+            sampleURL.searchParams.set('outputMint', config.OUTPUT_MINT);
             sampleURL.searchParams.set('amount', sampleAmt.toString());
-            sampleURL.searchParams.set('slippageBps', SLIPPAGE_BPS);
+            sampleURL.searchParams.set('slippageBps', String(config.SLIPPAGE_BPS)); // Преобразуем в строку
             const sampleJ = await (await fetch(sampleURL)).json();
             if (!sampleJ.routePlan?.length) {
                 logAndSendMessage(`[${now}] Нет цены для обмена`);
@@ -172,11 +182,15 @@ async function main() {
                 }
             }
         } catch (e) {
-            logAndSendMessage(`[${now}] Ошибка: ${e.message}`);
+            if (e instanceof Error) {
+                logAndSendMessage(`[${now}] Ошибка: ${e.message}`);
+            } else {
+                logAndSendMessage(`[${now}] Ошибка: Неизвестная ошибка`);
+            }
         }
     }
 
-    async function execSwap(quoteJson) {
+    async function execSwap(quoteJson: any) {
         const res = await fetch('https://lite-api.jup.ag/swap/v1/swap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
